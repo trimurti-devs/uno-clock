@@ -21,26 +21,46 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
       'https://uno-clock.onrender.com',
     ];
 
+// Flutter Web uses a random high port in dev (e.g. localhost:26263).
+// This helper allows ALL localhost origins regardless of port.
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // no-origin = mobile app / Arduino / Postman
+  if (allowedOrigins.includes(origin)) return true;
+  // Allow any localhost / 127.0.0.1 port for Flutter Web dev builds
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  return false;
+}
+
+// io cors uses isAllowedOrigin (function declaration above is hoisted)
 const io = socketIo(server, {
   cors: {
-    origin     : allowedOrigins,
-    methods    : ['GET', 'POST'],
+    origin     : (origin, callback) => {
+      if (isAllowedOrigin(origin)) return callback(null, true);
+      callback(new Error(`CORS: origin '${origin}' not allowed`));
+    },
+    methods    : ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'x-master-token', 'x-device-token'],
     credentials: true,
   },
 });
 
 app.use(helmet());
 
-// ── CORS: restrict to same allowedOrigins list (not open wildcard) ───────────
-app.use(cors({
+// ── CORS ─────────────────────────────────────────────────────────────────────
+// Must run BEFORE routes and BEFORE rate limiters so OPTIONS preflights
+// are answered immediately with the right headers.
+const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, Arduino)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (isAllowedOrigin(origin)) return callback(null, true);
     callback(new Error(`CORS: origin '${origin}' not allowed`));
   },
-  methods: ['GET', 'POST'],
-}));
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-master-token', 'x-device-token'],
+  credentials: true,
+  optionsSuccessStatus: 204, // IE11 compatibility
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // explicitly handle ALL preflight OPTIONS
 
 app.use(express.json({ limit: '1mb' }));
 
