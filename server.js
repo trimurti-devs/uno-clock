@@ -23,8 +23,8 @@ app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-const deviceLimiter = rateLimit({ windowMs: 15*60*1000, max: 500, standardHeaders: true, legacyHeaders: false });
-const appLimiter    = rateLimit({ windowMs: 10*60*1000, max: 200, standardHeaders: true, legacyHeaders: false });
+const deviceLimiter = rateLimit({ validate: { xForwardedForHeader: false }, windowMs: 15*60*1000, max: 500, standardHeaders: true, legacyHeaders: false });
+const appLimiter    = rateLimit({ validate: { xForwardedForHeader: false }, windowMs: 10*60*1000, max: 200, standardHeaders: true, legacyHeaders: false });
 
 const devices      = new Map();
 const deviceTokens = new Map();
