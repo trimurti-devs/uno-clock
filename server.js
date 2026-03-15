@@ -61,6 +61,8 @@ app.post('/api/v1/device/:id/status', deviceLimiter, (req, res) => {
   const { id } = req.params;
   const token  = req.headers['x-device-token'];
 
+  console.log(`[POST] Device ${id} token: ${token}`);
+
   if (!token) return res.status(401).json({ error: 'Missing device token' });
   if (deviceTokens.get(token) !== id)
     return res.status(401).json({ error: 'Invalid token for device' });
