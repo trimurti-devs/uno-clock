@@ -1,37 +1,71 @@
 require('dotenv').config();
 const express = require('express');
-const http = require('http');
+const http    = require('http');
 const socketIo = require('socket.io');
-const cors = require('cors');
-const helmet = require('helmet');
+const cors    = require('cors');
+const helmet  = require('helmet');
 const rateLimit = require('express-rate-limit');
-const Joi = require('joi');
+const Joi     = require('joi');
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
+
+// ── Allowed origins ──────────────────────────────────────────────────────────
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim())
+  : [
+      'http://localhost:8080',
+      'https://localhost:8080',
+      'http://localhost:50000',
+      'http://127.0.0.1:8080',
+      'https://uno-clock.onrender.com',
+    ];
+
 const io = socketIo(server, {
   cors: {
-    origin: process.env.ALLOWED_ORIGINS
-      ? process.env.ALLOWED_ORIGINS.split(',')
-      : ['http://localhost:8080', 'https://localhost:8080', 'http://127.0.0.1:8080', 'https://uno-clock.onrender.com'],
-    methods: ['GET', 'POST'],
-    credentials: true
-  }
+    origin     : allowedOrigins,
+    methods    : ['GET', 'POST'],
+    credentials: true,
+  },
 });
 
 app.use(helmet());
-app.use(cors());
+
+// ── CORS: restrict to same allowedOrigins list (not open wildcard) ───────────
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Postman, Arduino)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin '${origin}' not allowed`));
+  },
+  methods: ['GET', 'POST'],
+}));
+
 app.use(express.json({ limit: '1mb' }));
 
-const deviceLimiter = rateLimit({ validate: { xForwardedForHeader: false }, windowMs: 15*60*1000, max: 500, standardHeaders: true, legacyHeaders: false });
-const appLimiter    = rateLimit({ validate: { xForwardedForHeader: false }, windowMs: 10*60*1000, max: 200, standardHeaders: true, legacyHeaders: false });
+const deviceLimiter = rateLimit({
+  validate      : { xForwardedForHeader: false },
+  windowMs      : 15 * 60 * 1000,
+  max           : 500,
+  standardHeaders: true,
+  legacyHeaders : false,
+});
+
+const appLimiter = rateLimit({
+  validate      : { xForwardedForHeader: false },
+  windowMs      : 10 * 60 * 1000,
+  max           : 200,
+  standardHeaders: true,
+  legacyHeaders : false,
+});
 
 const devices      = new Map();
 const deviceTokens = new Map();
 const pendingCmds  = new Map();
 
-// Load device credentials from environment variables on boot
-// Set in Render Dashboard -> Environment:
+// ── Load device credentials from environment on boot ─────────────────────────
+// Set in Render Dashboard → Environment:
 //   MASTER_TOKEN = your master secret
 //   DEVICE_TOKEN = arduino token uuid
 //   DEVICE_ID    = clock01
@@ -46,29 +80,41 @@ const pendingCmds  = new Map();
   }
 })();
 
-// Health
+// ── How long without a heartbeat before declaring offline ────────────────────
+// Arduino posts every ~10 s; 15 000 ms gives one full missed cycle of headroom.
+const ONLINE_THRESHOLD_MS = 15000;
+
+function isDeviceOnline(data) {
+  if (!data || !data.lastSeen) return false;
+  return (Date.now() - new Date(data.lastSeen).getTime()) < ONLINE_THRESHOLD_MS;
+}
+
+// ── Health ───────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), devices: devices.size });
 });
 
-// List devices
+// ── List devices ─────────────────────────────────────────────────────────────
 app.get('/api/v1/devices', appLimiter, (req, res) => {
-  const deviceList = Array.from(devices.entries()).map(([id, data]) => {
-    const lastSeen = new Date(data.lastSeen);
-    const isOnline = (Date.now() - lastSeen) < 5000; // Consider online if heard in last 5 seconds
-    return { id, online: isOnline, lastSeen: data.lastSeen, temp: data.temp, hum: data.hum };
-  });
+  const deviceList = Array.from(devices.entries()).map(([id, data]) => ({
+    id,
+    online  : isDeviceOnline(data),
+    lastSeen: data.lastSeen,
+    temp    : data.temp,
+    hum     : data.hum,
+  }));
   res.json(deviceList);
 });
 
-// Arduino POST status
+// ── Arduino POST status ──────────────────────────────────────────────────────
 app.post('/api/v1/device/:id/status', deviceLimiter, (req, res) => {
   const { id } = req.params;
   const token  = req.headers['x-device-token'];
 
-  console.log(`[POST] Device ${id} token: ${token}`);
+  console.log(`[POST] Device ${id}`);
 
-  if (!token) return res.status(401).json({ error: 'Missing device token' });
+  if (!token)
+    return res.status(401).json({ error: 'Missing device token' });
   if (deviceTokens.get(token) !== id)
     return res.status(401).json({ error: 'Invalid token for device' });
 
@@ -82,32 +128,35 @@ app.post('/api/v1/device/:id/status', deviceLimiter, (req, res) => {
     alarm_hm   : Joi.string().allow(''),
     alarm_h    : Joi.number().integer().min(0).max(23).required(),
     alarm_m    : Joi.number().integer().min(0).max(59).required(),
-    buzzer_on  : Joi.boolean().required()
+    buzzer_on  : Joi.boolean().required(),
   });
 
   const { error: ve } = schema.validate(req.body);
-  if (ve) return res.status(400).json({ error: 'Invalid data', details: ve.details[0].message });
+  if (ve)
+    return res.status(400).json({ error: 'Invalid data', details: ve.details[0].message });
 
-  devices.set(id, { ...req.body, lastSeen: new Date().toISOString() });
-  io.to(id).emit('status', { ...req.body, lastSeen: new Date().toISOString() });
+  const record = { ...req.body, lastSeen: new Date().toISOString() };
+  devices.set(id, record);
 
+  // Emit to Flutter clients watching this device
+  io.to(id).emit('status', { ...record, online: true });
+
+  // Return any pending command to the Arduino
   const cmd = pendingCmds.get(id) || null;
   if (cmd) pendingCmds.delete(id);
 
   res.json({ ok: true, cmd });
 });
 
-// Flutter -> queue command for device
+// ── Flutter GET status ───────────────────────────────────────────────────────
 app.get('/api/v1/device/:id/status', appLimiter, (req, res) => {
   const { id } = req.params;
-  const data = devices.get(id);
+  const data   = devices.get(id);
   if (!data) return res.status(404).json({ error: 'Device not found' });
-  
-  const lastSeen = new Date(data.lastSeen);
-  const isOnline = (Date.now() - lastSeen) < 5000; // online if heard within 5 seconds
-  res.json({ ...data, online: isOnline });
+  res.json({ ...data, online: isDeviceOnline(data) });
 });
 
+// ── Flutter POST command → queue for Arduino ─────────────────────────────────
 app.post('/api/v1/device/:id/command', appLimiter, (req, res) => {
   const { id } = req.params;
   const master = req.headers['x-master-token'];
@@ -119,7 +168,7 @@ app.post('/api/v1/device/:id/command', appLimiter, (req, res) => {
     buzzer     : Joi.boolean(),
     alarm_h    : Joi.number().integer().min(0).max(23),
     alarm_m    : Joi.number().integer().min(0).max(59),
-    alarm_armed: Joi.boolean()
+    alarm_armed: Joi.boolean(),
   }).min(1);
 
   const { error: ve, value } = schema.validate(req.body);
@@ -134,7 +183,7 @@ app.post('/api/v1/device/:id/command', appLimiter, (req, res) => {
   res.json({ ok: true, queued: pendingCmds.get(id) });
 });
 
-// Register device token (protected, manual use only)
+// ── Re-register device token (protected, manual / boot use only) ─────────────
 app.post('/api/v1/device/:id/token', (req, res) => {
   const { id }  = req.params;
   const master  = req.headers['x-master-token'];
@@ -143,14 +192,15 @@ app.post('/api/v1/device/:id/token', (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
 
   const token = process.env.DEVICE_TOKEN;
-  if (!token) return res.status(500).json({ error: 'DEVICE_TOKEN env var not set on server' });
+  if (!token)
+    return res.status(500).json({ error: 'DEVICE_TOKEN env var not set on server' });
 
   deviceTokens.set(token, id);
   console.log(`[TOKEN] Re-registered token for device ${id}`);
   res.json({ deviceId: id, message: 'Token registered' });
 });
 
-// Socket.IO
+// ── Socket.IO ────────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`[SOCKET] Connected: ${socket.id}`);
 
@@ -158,7 +208,7 @@ io.on('connection', (socket) => {
     socket.join(deviceId);
     socket.emit('connected', { deviceId });
     const data = devices.get(deviceId);
-    if (data) socket.emit('status', data);
+    if (data) socket.emit('status', { ...data, online: isDeviceOnline(data) });
   });
 
   socket.on('disconnect', () => {
@@ -166,6 +216,7 @@ io.on('connection', (socket) => {
   });
 });
 
+// ── Fallback & error handlers ─────────────────────────────────────────────────
 app.use('*', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => {
   console.error(err.stack);
