@@ -12,8 +12,9 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
-    methods: ['GET', 'POST']
+    origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:8080', 'https://localhost:8080', 'http://127.0.0.1:8080'],
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
@@ -88,6 +89,8 @@ app.post('/api/v1/device/:id/status', deviceLimiter, (req, res) => {
     lastSeen: new Date().toISOString()
   });
 
+  console.log(`[DEVICE] ${id} status updated:`, req.body);
+  console.log(`[EMIT] Broadcasting to room ${id} (${io.sockets.adapter.rooms.get(id)?.size || 0} clients)`);
   io.to(id).emit('status', req.body);
   res.json({ ok: true });
 });
@@ -104,13 +107,34 @@ app.post('/api/v1/device/:id/token', (req, res) => {
   res.json({ deviceId: id, token });
 });
 
-// Socket.io - App clients
+// Socket.io - App clients  
 io.on('connection', (socket) => {
+  console.log(`[SOCKET] Client ${socket.id} connected`);
+  
   socket.on('join-device', (deviceId) => {
+    console.log(`[SOCKET] Client ${socket.id} joining device: ${deviceId}`);
     socket.join(deviceId);
     socket.emit('connected', { deviceId });
     const data = devices.get(deviceId);
-    if (data) socket.emit('status', data);
+    if (data) {
+      console.log(`[SOCKET] Sending cached status to ${deviceId}`);
+      socket.emit('status', data);
+    } else {
+      console.log(`[SOCKET] No cached data for ${deviceId}`);
+    }
+  });
+  
+  socket.on('disconnect', () => {
+    console.log(`[SOCKET] Client ${socket.id} disconnected`);
+  });
+  
+  socket.on('buzzer', (data) => {
+    console.log(`[SOCKET] Buzzer command: ${JSON.stringify(data)}`);
+    // Forward to device room if needed
+  });
+  
+  socket.on('alarm-set', (data) => {
+    console.log(`[SOCKET] Alarm command: ${JSON.stringify(data)}`);
   });
 });
 
