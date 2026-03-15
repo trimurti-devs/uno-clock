@@ -95,16 +95,17 @@ app.post('/api/v1/device/:id/status', deviceLimiter, (req, res) => {
   res.json({ ok: true });
 });
 
-// Generate token endpoint (admin/use once)
+// Generate/register device token (run once)
 app.post('/api/v1/device/:id/token', (req, res) => {
   const { id } = req.params;
   const masterToken = req.headers['x-master-token'];
   if (masterToken !== process.env.MASTER_TOKEN) {
     return res.status(401).json({ error: 'Master token required' });
   }
-  const token = uuidv4();
+  const token = 'ebc8445e-33d1-4073-8906-aa1189f04ba2'; // Arduino hardcoded token
   deviceTokens.set(token, id);
-  res.json({ deviceId: id, token });
+  console.log(`[TOKEN] Registered token for device ${id}`);
+  res.json({ deviceId: id, token, message: 'Token registered' });
 });
 
 // Socket.io - App clients  
